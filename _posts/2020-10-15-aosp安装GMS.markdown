@@ -1,0 +1,95 @@
+---
+layout: post
+title: "自制系统的GMS安装"
+date: 2020-10-14 20:20:26 +0800
+categories: 2020-10
+tags: aosp,GMS
+img: 
+describe: 出于某些原因，要在自制系统中安装GMS
+---
+
+
+## 需求
+aosp编译完后，跑起来的小三轮基本啥都没有，出于某些原因，测试的app需要gms，不然就罢工。。。
+
+
+## 尝试1
+
+开始的思路是直接下app装就是了
+例如:
+
+ * com.google.android.gms
+ * com.google.android.gsf
+ 
+ 下了对应系统版本的安装包，发现不行，没卵用，一直报错
+
+## 尝试2
+
+[stackoverflow找到一个](https://stackoverflow.com/questions/41695566/install-google-apps-on-aosp-build) ，大致思路是
+
+* 先刷对应系统版本的官方镜像
+* adb进入系统，将以下app的安装包拷贝出来
+
+        adb pull /system/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk
+        adb pull /system/priv-app/Phonesky/Phonesky.apk
+        adb pull /system/priv-app/PrebuiltGmsCore/PrebuiltGmsCore.apk
+  
+* 刷回自制系统，将导出的apk拷贝进对应路径
+ 
+ 
+## 花絮
+### 刷机
+只要网络没问题，下载官方镜像刷机，没毛病。
+ 
+这里出了点意外，刷不回去了。。。包已经导出，但是刷不回自制系统，捣鼓了半天，搜了好多东西，都没找到合适的方案
+ 
+这里记录下自己的解决步骤：
+ 
+ * 官方镜像的刷机，只使用了update参数，将radio_xxx_.img刷入
+ * 之后就是自制系统无法引导，永远工程模式
+ * 尝试了各种方式，优先刷boot，擦除boot信息等，都无效
+ * 最后是偶然测试刷官方镜像的bootloader，隧成功
+
+#### 拷贝权限
+
+继续按思路走，卡在磁盘挂载，提示 
+
+ * mount: '/system' not in /proc/mounts
+ 
+ [继续找到方案](https://groups.google.com/g/android-platform/c/2Sxus8VNqc8?pli=1) 
+ 
+ 需要关闭verity，于是
+ 
+ 
+ * adb root
+ * adb disablee-verity
+ * adb root
+ 
+ 之后再remount，就没问题了
+ 
+## 最后
+依次执行命令就行了
+
+     adb push GoogleServicesFramework.apk /sdcard/
+     adb push Phonesky.apk /sdcard/
+     adb push PrebuiltGmsCore.apk /sdcard/
+     
+     cd /system/priv-app
+     
+     mkdir GoogleServicesFramework
+     mkdir Phonesky
+     mkdir PrebuiltGmsCore
+     
+     cp /sdcard/GoogleServicesFramework.apk GoogleServicesFramework/GoogleServicesFramework.apk
+     cp /sdcard/Phonesky.apk Phonesky/Phonesky.apk
+     cp /sdcard/PrebuiltGmsCore.apk PrebuiltGmsCore/PrebuiltGmsCore.apk
+     
+     chmod 755 GoogleServicesFramework
+     chmod 755 Phonesky
+     chmod 755 PrebuiltGmsCore
+     
+     chmod 644 /system/priv-app/GoogleServicesFramework/GoogleServicesFramework.apk
+     chmod 644 /system/priv-app/Phonesky/Phonesky.apk
+     chmod 644 /system/priv-app/PrebuiltGmsCore/PrebuiltGmsCore.apk
+     
+收工    

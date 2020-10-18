@@ -1,0 +1,286 @@
+---
+layout: post
+title: "记录某个app抓包折腾"
+date: 2020-10-16 16:52:26 +0800
+categories: 2020-10
+tags: frida,hook，逆向，抓包
+img: 
+describe: 有点简单又特殊的app
+---
+
+
+## 起因
+
+这里记录下折腾的历程。
+
+本来是出于某个不可描述原因逆向，结果一上来就吃闭门羹，这真是技不如人。。
+
+逆向嘛，第一步总是抓包
+
+先是普通的代理，走charls
+
+![first_result.jpg](https://i.loli.net/2020/10/15/clBGJ8w1XCLx3jI.jpg)
+
+嗯，不仅走https，国内还不让访问。。。
+
+网络环境问题这里就不展开了，我花了3-4天，在物理层上解决了这个问题，嗯，现在变成这样
+
+![second_result.png](https://i.loli.net/2020/10/15/zOuE9d6FZhrjyfV.png)
+
+## 现象
+嗯，好的，看来加了证书校验。
+
+手头有apk的文件，先打开瞧瞧呗，首先几个关键类：
+* SSLContext
+* TrustManagerFactory
+* X509TrustManager
+* KeyStore
+
+对应的关键方法
+* init，getInstance("TLS")，getInstance("SSL")
+* getTrustManagers
+* checkClientTrusted，checkServerTrusted，getAcceptedIssuers
+* load，setCertificateEntry
+
+
+jadx走一波
+
+
+![img](/assets/images/blog/abstractHttp.png)
+
+嗯，自定义了TrustManager和HostnameVerifier
+
+![img](/assets/images/blog/tlskt.png)
+
+嗯，单项证书校验
+#### 题外 --- 判断客户端单双向通信，[参考](https://blog.csdn.net/chituhuan/article/details/80112129)
+
+Android 作为客户端https 通信，通常需要一个SSLContext， SSLContext 需要配置一个 TrustManager，如果是双向通信，还需要一个 KeyManager。
+
+ 1. 单行https TrustManager
+
+ 2. 双向https TrustManager KeyManager
+
+ 3. KeyManager 负责提供证书和私钥，证书发给对方peer
+
+ 4. TrustManager 负责验证peer 发来的证书。
+ 
+
+根据代码和目前抓包的情况，基本能确定就是`单向校验`+`证书锁定`，即SSL Pinning
+    
+## 解决思路
+
+### SSL Pinning
+[参考资料](https://crifan.github.io/app_capture_package_tool_charles/website/how_capture_app/complex_https/https_ssl_pinning/#%E4%BB%80%E4%B9%88%E6%98%AFssl-pinning)
+
+SSL pinning=证书绑定=SSL证书绑定
+
+对方的app内部，只允许，承认其自己的，特定的证书
+
+导致此处Charles的证书不识别，不允许
+
+导致Charles无法解密看到https的明文数据
+
+这里有几个思路：
+
+* 往系统添加charles的证书
+
+* 通过frida等挂勾手段，绕开校验
+
+* 修改源码去配置允许抓包
+    * 如果你是开发者 直接添加`res/xml/network_security_config.xml`
+    
+        首先修改AndroidManifest.xml，增加如下配置：
+        
+        ```shell
+        <?xml version="1.0" encoding="utf-8"?>
+          <manifest ... >
+            <application android:networkSecurityConfig="@xml/network_security_config"
+                          ... >
+            ...
+            </application>
+          </manifest>
+        ```
+          
+       再修改network_security_config
+        
+        ```shell
+        <?xml version="1.0" encoding="utf-8"?>
+          <network-security-config>
+            <domain-config>
+              <domain includeSubdomains="true">你要抓取的域名</domain>
+              <trust-anchors>
+                <certificates src="@raw/证书文件名"/>
+              </trust-anchors>
+          </domain-config>
+        </network-security-config>
+       ```
+
+      嗯，想想现在干的事，这条路子知道就好。。
+    
+    * 重打包，将上述文件弄进去
+      
+      [三方工具 AddSecurityExceptionAndroid](https://github.com/levyitay/AddSecurityExceptionAndroid)
+
+本着研究精神，每个都试试吧
+
+## 将charles证书添加到系统根证书中去
+
+首先，手机下载charles的ssl证书，嗯，问题来了，下载的是pem证书。。。
+
+![img](/assets/images/blog/charles_pem.png)
+
+让我门看看系统的证书啥样子
+
+![img](/assets/images/blog/system_cer.png)
+
+
+google一把，[参考资料](https://blog.jamie.holdings/2016/09/04/installing-a-new-trusted-ssl-root-certificate-on-android/)
+
+* 首先获取签名的数字id
+
+`openssl x509 -inform PEM -subject_hash_old -in Charles.pem | head -1`
+
+* 创建同类型文件
+
+我这里是1d775612
+
+ `cat cert.pem > 1d775612.0`
+
+* 复制内容
+
+ `openssl x509 -inform PEM -text -in Charles.pem -out /dev/null >> 1d775612.0`
+
+* 拷贝到指定目录
+  
+  `adb push 1d775612.0 /system/etc/security/cacerts/`
+  
+  注意权限问题
+  
+  `chmod 644 /system/etc/security/cacerts/1d775612.0`
+  
+好了，试一把
+
+![img](/assets/images/blog/net_traffic_result.png)
+
+完美~
+
+## 通过frida等挂勾手段，*绕开校验*，或*者添加自己的证书*
+
+这个不用想，别造轮子，找大牛的脚本就完事了
+
+* 绕开校验
+
+ [参考资料：DroidSSLUnpinng](https://github.com/WooyunDota/DroidSSLUnpinning)
+ 
+ [参考资料：DroidDrops](https://github.com/WooyunDota/DroidDrops/blob/master/2018/SSL.Pinning.Practice.md)
+
+ 和上面那个比起来就不是很完美，只能抓到app的请求
+ 
+ ![img](/assets/images/blog/net_traffic_result_v.png)
+ 
+ 
+ 
+* 自己添加证书
+
+  这个思路就是在目标程序加载证书的时候，把你的证书也加进去
+  
+  [参考资料：Universal Android SSL Pinning Bypass with Frida ](https://codeshare.frida.re/@pcipolloni/universal-android-ssl-pinning-bypass-with-frida/)
+  
+  ```shell
+  /* 
+     Android SSL Re-pinning frida script v0.2 030417-pier 
+  
+     $ adb push burpca-cert-der.crt /data/local/tmp/cert-der.crt
+     $ frida -U -f it.app.mobile -l frida-android-repinning.js --no-pause
+  
+     https://techblog.mediaservice.net/2017/07/universal-android-ssl-pinning-bypass-with-frida/
+     
+     UPDATE 20191605: Fixed undeclared var. Thanks to @oleavr and @ehsanpc9999 !
+  */
+  
+  setTimeout(function(){
+      Java.perform(function (){
+      	console.log("");
+  	    console.log("[.] Cert Pinning Bypass/Re-Pinning");
+  
+  	    var CertificateFactory = Java.use("java.security.cert.CertificateFactory");
+  	    var FileInputStream = Java.use("java.io.FileInputStream");
+  	    var BufferedInputStream = Java.use("java.io.BufferedInputStream");
+  	    var X509Certificate = Java.use("java.security.cert.X509Certificate");
+  	    var KeyStore = Java.use("java.security.KeyStore");
+  	    var TrustManagerFactory = Java.use("javax.net.ssl.TrustManagerFactory");
+  	    var SSLContext = Java.use("javax.net.ssl.SSLContext");
+  
+  	    // Load CAs from an InputStream
+  	    console.log("[+] Loading our CA...")
+  	    var cf = CertificateFactory.getInstance("X.509");
+  	    
+  	    try {
+            //这里用你自己的证书
+  	    	var fileInputStream = FileInputStream.$new("/data/local/tmp/xxx.crt");
+  	    }
+  	    catch(err) {
+  	    	console.log("[o] " + err);
+  	    }
+  	    
+  	    var bufferedInputStream = BufferedInputStream.$new(fileInputStream);
+  	  	var ca = cf.generateCertificate(bufferedInputStream);
+  	    bufferedInputStream.close();
+  
+  		var certInfo = Java.cast(ca, X509Certificate);
+  	    console.log("[o] Our CA Info: " + certInfo.getSubjectDN());
+  
+  	    // Create a KeyStore containing our trusted CAs
+  	    console.log("[+] Creating a KeyStore for our CA...");
+  	    var keyStoreType = KeyStore.getDefaultType();
+  	    var keyStore = KeyStore.getInstance(keyStoreType);
+  	    keyStore.load(null, null);
+  	    keyStore.setCertificateEntry("ca", ca);
+  	    
+  	    // Create a TrustManager that trusts the CAs in our KeyStore
+  	    console.log("[+] Creating a TrustManager that trusts the CA in our KeyStore...");
+  	    var tmfAlgorithm = TrustManagerFactory.getDefaultAlgorithm();
+  	    var tmf = TrustManagerFactory.getInstance(tmfAlgorithm);
+  	    tmf.init(keyStore);
+  	    console.log("[+] Our TrustManager is ready...");
+  
+  	    console.log("[+] Hijacking SSLContext methods now...")
+  	    console.log("[-] Waiting for the app to invoke SSLContext.init()...")
+  
+  	   	SSLContext.init.overload("[Ljavax.net.ssl.KeyManager;", "[Ljavax.net.ssl.TrustManager;", "java.security.SecureRandom").implementation = function(a,b,c) {
+  	   		console.log("[o] App invoked javax.net.ssl.SSLContext.init...");
+  	   		SSLContext.init.overload("[Ljavax.net.ssl.KeyManager;", "[Ljavax.net.ssl.TrustManager;", "java.security.SecureRandom").call(this, a, tmf.getTrustManagers(), c);
+  	   		console.log("[+] SSLContext initialized with our custom TrustManager!");
+  	   	}
+      });
+  
+  ```
+  
+  同上，只能抓到app的请求，也算实现效果
+
+
+## 修改源码去配置允许抓包
+
+  嗯，大失败。。。打包不成功。。。，脚本有问题。。
+  
+  `jarsigner: 无法打开 jar 文件: `
+  
+
+## 总结
+  
+  以上方法都试了一遍，嗯,添加系统根证书这个方法比较好，不用外挂程序，即可实现所有app的抓包，一劳永逸
+  
+  唯一的要求就是要root
+  
+  至于反抗嘛，下次，下次～不想写了，懒。。。能坚持到现在都算不容易了
+  
+  这次是边调试边写，累死了，收工～
+
+
+## 其他资料
+
+ [常规SLL unPinning案例1](http://www.site-digger.com/html/articles/20191018/751.html)
+ 
+ [其他参考资料 抓包教程](https://crifan.github.io/app_capture_package_tool_charles/website/)
+

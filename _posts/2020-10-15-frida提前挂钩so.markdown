@@ -1,0 +1,61 @@
+---
+layout: post
+title: "frida提前挂钩so"
+date: 2020-10-15 15:23:26 +0800
+categories: 2020-10
+tags: frida,hook
+img: 
+describe: 主要记录思路
+---
+
+## 0x01
+
+需求就是在加载so后立即hook函数
+
+## 0x02
+这个针对老版本
+
+        var android_dlopen_ext = Module.findExportByName(null, "android_dlopen_ext");
+        console.log(android_dlopen_ext);
+        if (android_dlopen_ext != null) {
+            Interceptor.attach(android_dlopen_ext, {
+                onEnter: function (args) {
+                    var soName = args[0].readCString();
+                    console.log(soName);
+                    if (soName.indexOf("**.so") !== -1) {
+                        console.log("------load **----------")
+                        this.hook = true;
+                    }
+                },
+                onLeave: function (retval) {
+                    if (this.hook) {
+                        //TODO hookso
+                    }
+                }
+            });
+        }
+
+新系统版本
+
+        var android_dlopen_ext = Module.findExportByName(null, "android_dlopen_ext");
+        console.log(android_dlopen_ext);
+        if(android_dlopen_ext != null){
+            Interceptor.attach(android_dlopen_ext,{
+                onEnter: function(args){
+                    var soName = args[0].readCString();
+                    console.log(soName);
+                    if(soName.indexOf("libc.so") != -1){
+                        this.hook = true;
+                    }
+                },
+                onLeave: function(retval){
+                    if(this.hook) {
+                        dlopentodo();
+                    };
+                }
+            });
+        }
+        function dlopentodo(){
+            //todo ...
+        }
+

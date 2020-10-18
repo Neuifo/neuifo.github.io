@@ -1,0 +1,22 @@
+---
+layout: post
+title: "gitignore提交缓存问题"
+date: 2020-10-14 20:20:26 +0800
+categories: 2020-10
+tags: git
+img: https://i.loli.net/2020/10/14/QMOw25pUhPXDeiN.png
+describe: intellj系列vsc使用指南
+---
+
+## 问题描述
+commd+shift+a把不该提交的，提交了，手动添加gitignore都不起作用
+
+这个问题遇到过，一直没在意，以前是提交时，move files to other change list
+
+现在文件多了，点不过来了。。。
+
+
+## 解决办法
+百度+google
+
+git rm -r -f --cached xxx 
