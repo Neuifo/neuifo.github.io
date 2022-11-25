@@ -1,0 +1,64 @@
+---
+layout: post
+title: "不同dex的同路径文件加载"
+date: 2021-04-01 14:57:11 +0800
+categories: 2021-04
+tags: aosp,art,classloader,class_linker
+img: 
+describe: 同路径java文件不同dex指定加载
+---
+
+## 0x01:需求
+
+   需求嘛，目前推测某app的算法被特定要求在指定类名的指定方法中调用，目前是可以顺利attach到目标进程，做部分插桩或者调用方法
+   
+   但是目标函数输入输出不符合期望，加密算法只是目标函数中运行时的一部分，所有就有如此想法：
+   
+   在其他路径中（dex文件）定义同路径同名称的文件，在对应方法中，写入需要的代码，然后以插桩的形式，依附到目标app
+   
+   通过指定的classloader在需要的时候加载自定义的同名class来使用
+   
+## 0x01:思路
+
+   这里走了不少弯路，想的简单，觉得只要重新加载目标class文件即可
+   
+   [案例1](https://stackabuse.com/example-loading-a-java-class-at-runtime/)
+   [案例2](http://tutorials.jenkov.com/java-reflection/dynamic-class-loading-reloading.html)
+   [案例3](https://stackoverflow.com/questions/20091075/reload-used-classes-at-runtime-java)
+   [案例4](https://stackoverflow.com/questions/14316996/how-to-replace-classes-in-a-running-application-in-java)
+   
+   案例4很有意思，是Tomcat的重载机制，尝试后，发现getResource永远返回null。。。
+   
+   尝试：在特定dex中添加同路径同名文件，通过dexpath加载
+   
+   问题：被添加的dex为系统库，一旦加载后将不再加载app自身的class，导致各种问题。。。
+   
+## 0x02:解决
+
+   这里只能看源码。。
+   
+   几个关键类:DexCache mirror/class runtime/class_linker
+   
+   入口:class_linker.cc->ClassLinker::LoadClass
+   
+   
+   
+   
+   JNI 4 GetStringUTFChars "GLSUser"
+   2021-04-20 14:23:57.346 4246-4503/com.google.android.gms.unstable W/art: JNI 4 GetStringUTFChars "[AppCertManager] IOException while requesting key: 
+   2021-04-20 14:23:57.347 4246-4503/com.google.android.gms.unstable W/art: java.io.IOException: Invalid device key response.
+   2021-04-20 14:23:57.347 4246-4503/com.google.android.gms.unstable W/art:     at ijn.b(:com.google.android.gms@210915019@21.09.15 (040400-361652764):42)
+   2021-04-20 14:23:57.347 4246-4503/com.google.android.gms.unstable W/art:     at java.lang.reflect.Method.invoke(Native Method)
+   2021-04-20 14:23:57.347 4246-4503/com.google.android.gms.unstable W/art:     at android.content.google.DroidGuardApi.getDeviceKey(DroidGuardApi.java:236)
+   2021-04-20 14:23:57.347 4246-4503/com.google.android.gms.unstable W/art:     at android.content.google.IDroidGuardApi$Stub.onTransact(IDroidGuardApi.java:320)
+   2021-04-20 14:23:57.347 4246-4503/com.google.android.gms.unstable W/art:     at android.os.Binder.execTransact(Binder.java:585)
+   2021-04-20 14:23:57.348 4246-4503/com.google.android.gms.unstable W/art: "
+   2021-04-20 14:23:57.348 4246-4503/com.google.android.gms.unstable W/GLSUser: [AppCertManager] IOException while requesting key: 
+   java.io.IOException: Invalid device key response.
+       at ijn.b(:com.google.android.gms@210915019@21.09.15 (040400-361652764):42)
+       at java.lang.reflect.Method.invoke(Native Method)
+       at android.content.google.DroidGuardApi.getDeviceKey(DroidGuardApi.java:236)
+       at android.content.google.IDroidGuardApi$Stub.onTransact(IDroidGuardApi.java:320)
+       at android.os.Binder.execTransact(Binder.java:585)
+   
+   

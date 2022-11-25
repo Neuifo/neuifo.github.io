@@ -1,0 +1,751 @@
+---
+layout: post
+title: "自定义运行时app包名"
+date: 2021-01-15 16:18:31 +0800
+categories: 2021-01
+tags: aosp
+img: 
+describe: 自定义运行时包名
+---
+
+## 0x01:需求
+
+   需求嘛，假设某app默认包名为com.a，在不能修改apk的前提下，要让他某种情况下以com.b运行。
+   
+   理清需求后，在改源码前，先补习下aosp默认的apk安装和运行过程
+   
+## 0x02:思路
+   
+   1.根据需求，可能是已经安装完成的app或者将要安装的app，那么系统要么有`读取app信息的数据库`， 要么`实时读取存储的apk文件`（/data/app目录下有所有安装app的apk文件），来启动app
+   
+   2.不管是读取数据库的方式，还是读取文件的方式，要找到`解析apk`和`读取存储信息`的位置，插入修改代码即可
+   
+   3.这里首先从安装过程入手，毕竟如果是数据库形式，对于已经安装过的app，要找到`存储信息的url或者sql`。<br/>而对于新安装的app或者实时读取信息的模式，则要找到解析的位置
+   
+   4.最后保险考虑，通过观察app启动时，读取信息的切入点来验证，插入的代码是否会奏效，顺带也深入了解一下framework层app的启动过程(上次其实是art层)
+   
+## 0x03:安装方式
+   
+   参考资料:[app安装过程](https://www.jianshu.com/p/c78d1ca260fb/) <br/>
+           [系统应用的安装](https://blog.csdn.net/king1425/article/details/70135813) <br/>
+           [app安装过程](https://www.jianshu.com/p/39402a37f705)  <br/>
+   
+  * 系统应用，开机默认安装的
+   
+  * adb install命令安装
+   
+  * 手动下载的apk文件，点击，或者通过一个应用安装的，2者都会弹出安装界面
+   
+   因为有不同的安装方式，所以对应的关键类和接口会有所不同，差异可能会导致漏掉hook点，所以提前整理好，把能埋的坑埋上
+   
+#### 1.系统应用安装解析流程<br/>
+   系统初始化system_service时(具体在`SystemService.startBootstrapServices`)，首先会`创建PMS`,并`调用main`方法扫描以下目录:<br/> custom/framework<br/> system/ framework<br/> vender/ framework<br/> system/ priv-app<br/> system/ app<br/> vender/ priv-app<br/> vender/ app<br/> vender /operator/app<br/> system/plugin<br/> vender/ plugin<br/> oem/app<br/>
+
+   所以`安装的重点`是PackageManagerService的`main`方法，先观察`解析`
+      
+   ```shell
+      类名: PackageManagerService
+      方法链：
+
+      public PackageManagerService(Context context, Installer installer,
+                boolean factoryTest, boolean onlyCore){
+
+              ......
+              mAppInstallDir = new File(dataDir, "app");
+              mAppLib32InstallDir = new File(dataDir, "app-lib");
+              mEphemeralInstallDir = new File(dataDir, "app-ephemeral");
+              mAsecInternalPath = new File(dataDir, "app-asec").getPath();
+              mDrmAppPrivateInstallDir = new File(dataDir, "app-private");
+              ......
+
+              ......
+              //app
+              scanDirTracedLI(mAppInstallDir, 0, scanFlags | SCAN_REQUIRE_KNOWN, 0);
+              //app-private
+              scanDirTracedLI(mDrmAppPrivateInstallDir, mDefParseFlags
+                      | PackageParser.PARSE_FORWARD_LOCK,
+                      scanFlags | SCAN_REQUIRE_KNOWN, 0);
+              //app-ephemeral
+              scanDirLI(mEphemeralInstallDir, mDefParseFlags
+                      | PackageParser.PARSE_IS_EPHEMERAL,
+                      scanFlags | SCAN_REQUIRE_KNOWN, 0);
+
+              ......
+
+      }
+
+      private void scanDirLI(File dir, final int parseFlags, int scanFlags, long currentTime)
+      
+      private PackageParser.Package scanPackageTracedLI(File scanFile, final int parseFlags,int scanFlags, long currentTime, UserHandle user)
+      
+      private PackageParser.Package scanPackageLI(File scanFile, int parseFlags, int scanFlags,
+                  long currentTime, UserHandle user) throws PackageManagerException {
+              if (DEBUG_INSTALL) Slog.d(TAG, "Parsing: " + scanFile);
+              PackageParser pp = new PackageParser();
+              pp.setSeparateProcesses(mSeparateProcesses);
+              pp.setOnlyCoreApps(mOnlyCore);
+              pp.setDisplayMetrics(mMetrics);
+      
+              if ((scanFlags & SCAN_TRUSTED_OVERLAY) != 0) {
+                  parseFlags |= PackageParser.PARSE_TRUSTED_OVERLAY;
+              }
+      
+              Trace.traceBegin(TRACE_TAG_PACKAGE_MANAGER, "parsePackage");
+              final PackageParser.Package pkg;
+              try {
+                  pkg = pp.parsePackage(scanFile, parseFlags);
+              } catch (PackageParserException e) {
+                  throw PackageManagerException.from(e);
+              } finally {
+                  Trace.traceEnd(TRACE_TAG_PACKAGE_MANAGER);
+              }
+      
+              return scanPackageLI(pkg, scanFile, parseFlags, scanFlags, currentTime, user);
+      }
+
+
+      private PackageParser.Package scanPackageLI(File scanFile, int parseFlags, int scanFlags,
+                  long currentTime, UserHandle user) throws PackageManagerException {
+              if (DEBUG_INSTALL) Slog.d(TAG, "Parsing: " + scanFile);
+              PackageParser pp = new PackageParser();
+              pp.setSeparateProcesses(mSeparateProcesses);
+              pp.setOnlyCoreApps(mOnlyCore);
+              pp.setDisplayMetrics(mMetrics);
+      
+              if ((scanFlags & SCAN_TRUSTED_OVERLAY) != 0) {
+                  parseFlags |= PackageParser.PARSE_TRUSTED_OVERLAY;
+              }
+      
+              Trace.traceBegin(TRACE_TAG_PACKAGE_MANAGER, "parsePackage");
+              final PackageParser.Package pkg;
+              try {
+                  //核心解析apk文件的接口，返回的Package为封装的apk信息
+                  pkg = pp.parsePackage(scanFile, parseFlags);
+              } catch (PackageParserException e) {
+                  throw PackageManagerException.from(e);
+              } finally {
+                  Trace.traceEnd(TRACE_TAG_PACKAGE_MANAGER);
+              }
+      
+              return scanPackageLI(pkg, scanFile, parseFlags, scanFlags, currentTime, user);
+      }
+      
+      private PackageParser.Package scanPackageDirtyLI(PackageParser.Package pkg,
+                  final int policyFlags, final int scanFlags, long currentTime, UserHandle user){
+              ......
+              // Getting the package setting may have a side-effect, so if we
+              // are only checking if scan would succeed, stash a copy of the
+              // old setting to restore at the end.
+              PackageSetting nonMutatedPs = null;
+
+              ......
+
+              // See comments in nonMutatedPs declaration
+              if ((scanFlags & SCAN_CHECK_ONLY) != 0) {
+                  PackageSetting foundPs = mSettings.peekPackageLPr(pkg.packageName);
+                  if (foundPs != null) {
+                      nonMutatedPs = new PackageSetting(foundPs);
+                  }
+              }
+
+              ......
+              if ((scanFlags & SCAN_CHECK_ONLY) != 0) {
+                  if (nonMutatedPs != null) {
+                      synchronized (mPackages) {
+                          //注意这里的mPackages,运行时会用到
+                          //根据目前代码，Settings的package是根据pkg的包名，通过peekPackageLPr构建的
+                          mSettings.mPackages.put(nonMutatedPs.name, nonMutatedPs);
+                      }
+                  }
+                  return pkg;
+              }
+              ......
+
+              // Add the new setting to mSettings
+              mSettings.insertPackageSettingLPw(pkgSetting, pkg);
+              // Add the new setting to mPackages
+              //PMS添加以安装的包信息
+              mPackages.put(pkg.applicationInfo.packageName, pkg);
+      }
+
+      
+   ```
+   根据代码，系统应用解析包名的方式为`PackageParser.parsePackage`
+   
+#### 1.2系统应用启动解析流程<br/>
+   
+   继system_service`初始化PMS完成安装`后,通过`初始化AMS`，在`startOtherServices`中通过调用`AMS.systemReady`来启动系统应用
+   
+   ```shell
+      类名:ActivityManagerService
+      public void systemReady(final Runnable goingCallback) {
+               ......
+               // Only start up encryption-aware persistent apps; once user is
+               // unlocked we'll come back around and start unaware apps
+               //启动系统级app
+               startPersistentApps(PackageManager.MATCH_DIRECT_BOOT_AWARE);
+   
+               // Start up initial activity.
+               mBooting = true;
+               // Enable home activity for system user, so that the system can always boot
+               if (UserManager.isSplitSystemUser()) {
+                   ComponentName cName = new ComponentName(mContext, SystemUserHomeActivity.class);
+                   try {
+                       AppGlobals.getPackageManager().setComponentEnabledSetting(cName,
+                               PackageManager.COMPONENT_ENABLED_STATE_ENABLED, 0,
+                               UserHandle.USER_SYSTEM);
+                   } catch (RemoteException e) {
+                       throw e.rethrowAsRuntimeException();
+                   }
+               }
+               //启动桌面
+               startHomeActivityLocked(currentUserId, "systemReady");
+               ......
+      }
+
+      private void startPersistentApps(int matchFlags) {
+              if (mFactoryTest == FactoryTest.FACTORY_TEST_LOW_LEVEL) return;
+      
+              synchronized (this) {
+                  try {
+                        //定位到PMS.getPersistentApplicationsInternal
+                      final List<ApplicationInfo> apps = AppGlobals.getPackageManager()
+                              .getPersistentApplications(STOCK_PM_FLAGS | matchFlags).getList();
+                      for (ApplicationInfo app : apps) {
+                          if (!"android".equals(app.packageName)) {
+                              addAppLocked(app, false, null /* ABI override */);
+                          }
+                      }
+                  } catch (RemoteException ex) {
+                  }
+              }
+      }
+
+
+
+
+      类名:PackageManagerService
+
+      public @NonNull ParceledListSlice<ApplicationInfo> getPersistentApplications(int flags) {
+          return new ParceledListSlice<>(getPersistentApplicationsInternal(flags));
+      }
+
+      private @NonNull List<ApplicationInfo> getPersistentApplicationsInternal(int flags) {
+        final ArrayList<ApplicationInfo> finalList = new ArrayList<ApplicationInfo>();
+
+        // reader
+        synchronized (mPackages) {
+            //启动app的列表来自这个mPackages
+            //在安装的时候已经发现，这个集合是所有以安装的app集合，实体为PackageParser的类
+            final Iterator<PackageParser.Package> i = mPackages.values().iterator();
+            final int userId = UserHandle.getCallingUserId();
+            while (i.hasNext()) {
+                final PackageParser.Package p = i.next();
+                if (p.applicationInfo == null) continue;
+
+                final boolean matchesUnaware = ((flags & MATCH_DIRECT_BOOT_UNAWARE) != 0)
+                        && !p.applicationInfo.isDirectBootAware();
+                final boolean matchesAware = ((flags & MATCH_DIRECT_BOOT_AWARE) != 0)
+                        && p.applicationInfo.isDirectBootAware();
+
+                if ((p.applicationInfo.flags & ApplicationInfo.FLAG_PERSISTENT) != 0
+                        && (!mSafeMode || isSystemApp(p))
+                        && (matchesUnaware || matchesAware)) {
+                    PackageSetting ps = mSettings.mPackages.get(p.packageName);
+                    if (ps != null) {
+                        ApplicationInfo ai = PackageParser.generateApplicationInfo(p, flags,
+                                ps.readUserState(userId), userId);
+                        if (ai != null) {
+                            finalList.add(ai);
+                        }
+                    }
+                }
+            }
+        }
+        return finalList;
+      }
+
+
+      final ProcessRecord addAppLocked(ApplicationInfo info, boolean isolated,
+                  String abiOverride) {
+              ProcessRecord app;
+              if (!isolated) {
+                  //如果同包名进程已存在，杀之
+                  app = getProcessRecordLocked(info.processName, info.uid, true);
+              } else {
+                  app = null;
+              }
+      
+              if (app == null) {
+                  app = newProcessRecordLocked(info, null, isolated, 0);
+                  updateLruProcessLocked(app, false, null);
+                  updateOomAdjLocked();
+              }
+      
+              // This package really, really can not be stopped.
+              try {
+                  AppGlobals.getPackageManager().setPackageStoppedState(
+                          info.packageName, false, UserHandle.getUserId(app.uid));
+              } catch (RemoteException e) {
+              } catch (IllegalArgumentException e) {
+                  Slog.w(TAG, "Failed trying to unstop package "
+                          + info.packageName + ": " + e);
+              }
+      
+              if ((info.flags & PERSISTENT_MASK) == PERSISTENT_MASK) {
+                  app.persistent = true;
+                  app.maxAdj = ProcessList.PERSISTENT_PROC_ADJ;
+              }
+              if (app.thread == null && mPersistentStartingProcesses.indexOf(app) < 0) {
+                  mPersistentStartingProcesses.add(app);
+                  //启动app
+                  startProcessLocked(app, "added application", app.processName, abiOverride,
+                          null /* entryPoint */, null /* entryPointArgs */);
+              }
+      
+              return app;
+      }
+
+      //调用的核心方法就是Process.start，这个在添加阻塞app启动一文已有详细流程
+      private final void startProcessLocked(ProcessRecord app, String hostingType,
+                  String hostingNameStr, String abiOverride, String entryPoint, String[] entryPointArgs){
+               ......
+               
+               // Start the process.  It will either succeed and return a result containing
+               // the PID of the new process, or else throw a RuntimeException.
+               boolean isActivityProcess = (entryPoint == null);
+               if (entryPoint == null) entryPoint = "android.app.ActivityThread";
+               Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "Start proc: " +
+                       app.processName);
+               checkTime(startTime, "startProcess: asking zygote to start proc");
+               Process.ProcessStartResult startResult = Process.start(entryPoint,
+                       app.processName, uid, uid, gids, debugFlags, mountExternal,
+                       app.info.targetSdkVersion, app.info.seinfo, requiredAbi, instructionSet,
+                       app.info.dataDir, entryPointArgs);
+               checkTime(startTime, "startProcess: returned from zygote!");
+               Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+   
+               mBatteryStatsService.noteProcessStart(app.processName, app.info.uid);
+               checkTime(startTime, "startProcess: done updating battery stats");
+               ......
+
+      }
+       
+    
+   ```
+   
+   大致梳理下系统级应用在`framework层`的启动流程:<br/>
+   1.`SystemService.startBootstrapServices`先构造`PMS`，`PMS`构造扫描指定的文件（apk）,扫描接口为`PMS.scanDirTracedLI`<br/><br/>
+   2.扫描解析文件的工具为`PackageParser`,返回值为`PackageParser.Package`,扫描完成后，调用`AMS.systemReady`来启动app(`startPersistentApps`)<br/><br/>
+   3.启动app时，通过`PMS.getPersistentApplications`将存储的`PackageParser.Package`转换成`ApplicationInfo`，再由`AMS.newProcessRecordLocked`包装成`ProcessRecord`<br/><br/>
+   4.最后调用`Process.start`对接art层来启动app<br/><br/>
+   
+   
+   
+   
+#### 2.adb安装解析流程<br/>
+   adb安装核心调用的是`Pm.runInstall()`
+      
+   ```shell
+      类名: com.android.commands.pm.Pm
+      
+      private int runInstall() throws RemoteException {
+              final InstallParams params = makeInstallParams();
+              final String inPath = nextArg();
+              boolean installExternal =
+                      (params.sessionParams.installFlags & PackageManager.INSTALL_EXTERNAL) != 0;
+              if (params.sessionParams.sizeBytes < 0 && inPath != null) {
+                  File file = new File(inPath);
+                  if (file.isFile()) {
+                      if (installExternal) {
+                          try {
+                              ApkLite baseApk = PackageParser.parseApkLite(file, 0);
+                              PackageLite pkgLite = new PackageLite(null, baseApk, null, null, null);
+                              params.sessionParams.setSize(
+                                      PackageHelper.calculateInstalledSize(pkgLite, false,
+                                              params.sessionParams.abiOverride));
+                          } catch (PackageParserException | IOException e) {
+                              System.err.println("Error: Failed to parse APK file : " + e);
+                              return 1;
+                          }
+                      } else {
+                          params.sessionParams.setSize(file.length());
+                      }
+                  }
+              }
+      
+              final int sessionId = doCreateSession(params.sessionParams,
+                      params.installerPackageName, params.userId);
+      
+              try {
+                  if (inPath == null && params.sessionParams.sizeBytes == 0) {
+                      System.err.println("Error: must either specify a package size or an APK file");
+                      return 1;
+                  }
+                  if (doWriteSession(sessionId, inPath, params.sessionParams.sizeBytes, "base.apk",
+                          false /*logSuccess*/) != PackageInstaller.STATUS_SUCCESS) {
+                      return 1;
+                  }
+                  if (doCommitSession(sessionId, false /*logSuccess*/)
+                          != PackageInstaller.STATUS_SUCCESS) {
+                      return 1;
+                  }
+                  System.out.println("Success");
+                  return 0;
+              } finally {
+                  try {
+                      mInstaller.abandonSession(sessionId);
+                  } catch (Exception ignore) {
+                  }
+              }
+      }
+  
+   ```
+   这里要关于app信息是通过`PackageParser.parsePackageLite`来获取，然后通过PackageInstaller的session相关方法安装
+      
+   
+#### 3.安装界面安装解析流程<br/>
+   不管是手动下载apk安装还是通过app安装，都会触发PackageInstallerActivity的点击，核心的安装接口为PackageInstaller/createSession/openSession
+   
+   ```shell
+      类名: PackageManagerService
+
+      public void onClick(View v)
+
+      private void startInstall() {
+              // Start subactivity to actually install the application
+              Intent newIntent = new Intent();
+              newIntent.putExtra(PackageUtil.INTENT_ATTR_APPLICATION_INFO,
+                      mPkgInfo.applicationInfo);
+              newIntent.setData(mPackageURI);
+              newIntent.setClass(this, InstallAppProgress.class);
+              String installerPackageName = getIntent().getStringExtra(
+                      Intent.EXTRA_INSTALLER_PACKAGE_NAME);
+              if (mOriginatingURI != null) {
+                  newIntent.putExtra(Intent.EXTRA_ORIGINATING_URI, mOriginatingURI);
+              }
+              if (mReferrerURI != null) {
+                  newIntent.putExtra(Intent.EXTRA_REFERRER, mReferrerURI);
+              }
+              if (mOriginatingUid != VerificationParams.NO_UID) {
+                  newIntent.putExtra(Intent.EXTRA_ORIGINATING_UID, mOriginatingUid);
+              }
+              if (installerPackageName != null) {
+                  newIntent.putExtra(Intent.EXTRA_INSTALLER_PACKAGE_NAME,
+                          installerPackageName);
+              }
+              if (getIntent().getBooleanExtra(Intent.EXTRA_RETURN_RESULT, false)) {
+                  newIntent.putExtra(Intent.EXTRA_RETURN_RESULT, true);
+                  newIntent.addFlags(Intent.FLAG_ACTIVITY_FORWARD_RESULT);
+              }
+              if(localLOGV) Log.i(TAG, "downloaded app uri="+mPackageURI);
+              startActivity(newIntent);
+              finish();
+      }
+
+      类名: InstallAppProgress
+
+      public void onClick(View v)
+
+      void initView(){
+        ...省略上半部分...
+        if ("package".equals(mPackageURI.getScheme())) {
+            try {
+                pm.installExistingPackage(mAppInfo.packageName);
+                onPackageInstalled(PackageInstaller.STATUS_SUCCESS);
+            } catch (PackageManager.NameNotFoundException e) {
+                onPackageInstalled(PackageInstaller.STATUS_FAILURE_INVALID);
+            }
+        } else {
+            final PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(
+                    PackageInstaller.SessionParams.MODE_FULL_INSTALL);
+            params.referrerUri = getIntent().getParcelableExtra(Intent.EXTRA_REFERRER);
+            params.originatingUri = getIntent().getParcelableExtra(Intent.EXTRA_ORIGINATING_URI);
+            params.originatingUid = getIntent().getIntExtra(Intent.EXTRA_ORIGINATING_UID,
+                    UID_UNKNOWN);
+
+            File file = new File(mPackageURI.getPath());
+            try {
+                PackageLite pkg = PackageParser.parsePackageLite(file, 0);
+                params.setAppPackageName(pkg.packageName);
+                params.setInstallLocation(pkg.installLocation);
+                params.setSize(
+                    PackageHelper.calculateInstalledSize(pkg, false, params.abiOverride));
+            } catch (PackageParser.PackageParserException e) {
+                Log.e(TAG, "Cannot parse package " + file + ". Assuming defaults.");
+                Log.e(TAG, "Cannot calculate installed size " + file + ". Try only apk size.");
+                params.setSize(file.length());
+            } catch (IOException e) {
+                Log.e(TAG, "Cannot calculate installed size " + file + ". Try only apk size.");
+                params.setSize(file.length());
+            }
+
+            mInstallHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    doPackageStage(pm, params);
+                }
+            });
+        }
+      
+      private void doPackageStage(PackageManager pm, PackageInstaller.SessionParams params)
+      }
+      
+
+   ```
+
+   这里要关于app信息是通过`PackageParser.parsePackageLite`来获取，安装方式和adb一样，依赖PackageInstaller
+   
+#### 4.PackageParser
+   
+   目前通过安装流程来看，包名的解析都依赖`PackageParser`，只是区别方法`parseApkLite`或者`parsePackageLite`
+   
+##### parseApkLite
+   ```shell
+      //flags默认传的都是0
+      public static ApkLite parseApkLite(File apkFile, int flags)
+                  throws PackageParserException {
+              final String apkPath = apkFile.getAbsolutePath();
+      
+              AssetManager assets = null;
+              XmlResourceParser parser = null;
+              try {
+                  assets = new AssetManager();
+                  assets.setConfiguration(0, 0, null, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                          Build.VERSION.RESOURCES_SDK_INT);
+      
+                  int cookie = assets.addAssetPath(apkPath);
+                  if (cookie == 0) {
+                      throw new PackageParserException(INSTALL_PARSE_FAILED_NOT_APK,
+                              "Failed to parse " + apkPath);
+                  }
+      
+                  final DisplayMetrics metrics = new DisplayMetrics();
+                  metrics.setToDefaults();
+      
+                  final Resources res = new Resources(assets, metrics, null);
+                  //构造XML解析器解析ANDROID_MANIFEST
+                  parser = assets.openXmlResourceParser(cookie, ANDROID_MANIFEST_FILENAME);
+      
+                  final Signature[] signatures;
+                  final Certificate[][] certificates;
+                  //由于flags是0，所以一般情况下，这里就是读取apk签名的过程
+                  if ((flags & PARSE_COLLECT_CERTIFICATES) != 0) {
+                      // TODO: factor signature related items out of Package object
+                      final Package tempPkg = new Package(null);
+                      Trace.traceBegin(TRACE_TAG_PACKAGE_MANAGER, "collectCertificates");
+                      try {
+                          collectCertificates(tempPkg, apkFile, 0 /*parseFlags*/);
+                      } finally {
+                          Trace.traceEnd(TRACE_TAG_PACKAGE_MANAGER);
+                      }
+                      signatures = tempPkg.mSignatures;
+                      certificates = tempPkg.mCertificates;
+                  } else {
+                      signatures = null;
+                      certificates = null;
+                  }
+      
+                  final AttributeSet attrs = parser;
+                  return parseApkLite(apkPath, res, parser, attrs, flags, signatures, certificates);
+      
+              } catch (XmlPullParserException | IOException | RuntimeException e) {
+                  throw new PackageParserException(INSTALL_PARSE_FAILED_UNEXPECTED_EXCEPTION,
+                          "Failed to parse " + apkPath, e);
+              } finally {
+                  IoUtils.closeQuietly(parser);
+                  IoUtils.closeQuietly(assets);
+              }
+      }
+
+      private static ApkLite parseApkLite(String codePath, Resources res, XmlPullParser parser,
+                  AttributeSet attrs, int flags, Signature[] signatures, Certificate[][] certificates)
+                          throws IOException, XmlPullParserException, PackageParserException {
+
+              //这里就是具体解析MANIFEST的方法
+              final Pair<String, String> packageSplit = parsePackageSplitNames(parser, attrs);
+      
+              int installLocation = PARSE_DEFAULT_INSTALL_LOCATION;
+              int versionCode = 0;
+              int revisionCode = 0;
+              boolean coreApp = false;
+              boolean multiArch = false;
+              boolean use32bitAbi = false;
+              boolean extractNativeLibs = true;
+      
+              for (int i = 0; i < attrs.getAttributeCount(); i++) {
+                  final String attr = attrs.getAttributeName(i);
+                  if (attr.equals("installLocation")) {
+                      installLocation = attrs.getAttributeIntValue(i,
+                              PARSE_DEFAULT_INSTALL_LOCATION);
+                  } else if (attr.equals("versionCode")) {
+                      versionCode = attrs.getAttributeIntValue(i, 0);
+                  } else if (attr.equals("revisionCode")) {
+                      revisionCode = attrs.getAttributeIntValue(i, 0);
+                  } else if (attr.equals("coreApp")) {
+                      coreApp = attrs.getAttributeBooleanValue(i, false);
+                  }
+              }
+      
+              // Only search the tree when the tag is directly below <manifest>
+              int type;
+              final int searchDepth = parser.getDepth() + 1;
+      
+              final List<VerifierInfo> verifiers = new ArrayList<VerifierInfo>();
+              while ((type = parser.next()) != XmlPullParser.END_DOCUMENT
+                      && (type != XmlPullParser.END_TAG || parser.getDepth() >= searchDepth)) {
+                  if (type == XmlPullParser.END_TAG || type == XmlPullParser.TEXT) {
+                      continue;
+                  }
+      
+                  if (parser.getDepth() == searchDepth && "package-verifier".equals(parser.getName())) {
+                      final VerifierInfo verifier = parseVerifier(res, parser, attrs, flags);
+                      if (verifier != null) {
+                          verifiers.add(verifier);
+                      }
+                  }
+      
+                  if (parser.getDepth() == searchDepth && "application".equals(parser.getName())) {
+                      for (int i = 0; i < attrs.getAttributeCount(); ++i) {
+                          final String attr = attrs.getAttributeName(i);
+                          if ("multiArch".equals(attr)) {
+                              multiArch = attrs.getAttributeBooleanValue(i, false);
+                          }
+                          if ("use32bitAbi".equals(attr)) {
+                              use32bitAbi = attrs.getAttributeBooleanValue(i, false);
+                          }
+                          if ("extractNativeLibs".equals(attr)) {
+                              extractNativeLibs = attrs.getAttributeBooleanValue(i, true);
+                          }
+                      }
+                  }
+              }
+              //这里的packageSplit.first就是包名
+              return new ApkLite(codePath, packageSplit.first, packageSplit.second, versionCode,
+                      revisionCode, installLocation, verifiers, signatures, certificates, coreApp,
+                      multiArch, use32bitAbi, extractNativeLibs);
+      }
+   ```
+
+##### parsePackageLite
+   这里返回`PackageLite`,包裹了一个`ApkLite`，区别于`parseApkLite`指定一个具体的apk文件，
+   
+   `parsePackageLite`可以指定一个文件夹，读取多个apk文件，但是从代码上来看，这多个apk文件应该是同一个包名
+
+   ```shell
+      public static PackageLite parsePackageLite(File packageFile, int flags)
+                  throws PackageParserException {
+              if (packageFile.isDirectory()) {
+                  return parseClusterPackageLite(packageFile, flags);
+              } else {
+                  return parseMonolithicPackageLite(packageFile, flags);
+              }
+      }
+
+      private static PackageLite parseMonolithicPackageLite(File packageFile, int flags)
+                  throws PackageParserException {
+              final ApkLite baseApk = parseApkLite(packageFile, flags);
+              final String packagePath = packageFile.getAbsolutePath();
+              return new PackageLite(packagePath, baseApk, null, null, null);
+      }
+      
+      private static PackageLite parseClusterPackageLite(File packageDir, int flags)
+                  throws PackageParserException {
+              final File[] files = packageDir.listFiles();
+              if (ArrayUtils.isEmpty(files)) {
+                  throw new PackageParserException(INSTALL_PARSE_FAILED_NOT_APK,
+                          "No packages found in split");
+              }
+      
+              String packageName = null;
+              int versionCode = 0;
+      
+              final ArrayMap<String, ApkLite> apks = new ArrayMap<>();
+              for (File file : files) {
+                  if (isApkFile(file)) {
+                      final ApkLite lite = parseApkLite(file, flags);
+      
+                      // Assert that all package names and version codes are
+                      // consistent with the first one we encounter.
+                      if (packageName == null) {
+                          packageName = lite.packageName;
+                          versionCode = lite.versionCode;
+                      } else {
+                          if (!packageName.equals(lite.packageName)) {
+                              throw new PackageParserException(INSTALL_PARSE_FAILED_BAD_MANIFEST,
+                                      "Inconsistent package " + lite.packageName + " in " + file
+                                      + "; expected " + packageName);
+                          }
+                          if (versionCode != lite.versionCode) {
+                              throw new PackageParserException(INSTALL_PARSE_FAILED_BAD_MANIFEST,
+                                      "Inconsistent version " + lite.versionCode + " in " + file
+                                      + "; expected " + versionCode);
+                          }
+                      }
+      
+                      // Assert that each split is defined only once
+                      if (apks.put(lite.splitName, lite) != null) {
+                          throw new PackageParserException(INSTALL_PARSE_FAILED_BAD_MANIFEST,
+                                  "Split name " + lite.splitName
+                                  + " defined more than once; most recent was " + file);
+                      }
+                  }
+              }
+      
+              final ApkLite baseApk = apks.remove(null);
+              if (baseApk == null) {
+                  throw new PackageParserException(INSTALL_PARSE_FAILED_BAD_MANIFEST,
+                          "Missing base APK in " + packageDir);
+              }
+      
+              // Always apply deterministic ordering based on splitName
+              final int size = apks.size();
+      
+              String[] splitNames = null;
+              String[] splitCodePaths = null;
+              int[] splitRevisionCodes = null;
+              if (size > 0) {
+                  splitNames = new String[size];
+                  splitCodePaths = new String[size];
+                  splitRevisionCodes = new int[size];
+      
+                  splitNames = apks.keySet().toArray(splitNames);
+                  Arrays.sort(splitNames, sSplitNameComparator);
+      
+                  for (int i = 0; i < size; i++) {
+                      splitCodePaths[i] = apks.get(splitNames[i]).codePath;
+                      splitRevisionCodes[i] = apks.get(splitNames[i]).revisionCode;
+                  }
+              }
+      
+              final String codePath = packageDir.getAbsolutePath();
+              return new PackageLite(codePath, baseApk, splitNames, splitCodePaths,
+                      splitRevisionCodes);
+      }
+    
+   ```
+
+#### 5.小结
+
+   至此，所有安装过程的apk`解析点`都捕捉到了，目前来看，安装的时候解析包名并没有存储数据库，直接就是读取apk文件中的xml，并解析
+   
+   接下来看启动过程的包名获取方式
+   
+
+## 0x04:启动过程
+   
+   参考资料:[桌面app启动流程](https://blog.csdn.net/mysimplelove/article/details/93722772)
+   
+   对应安装过程，启动过程么也应该有以下几种
+   
+   * 系统应用，开机默认自启动
+    
+   * adb install命令安装或者android studio启动
+    
+   * 系统默认桌面点击启动
+   
+   先从一般的来，看看手动启动的
+
+#### 1.桌面启动<br/>
+   
+   根据资料，桌面点击启动本质就是发送一个intent

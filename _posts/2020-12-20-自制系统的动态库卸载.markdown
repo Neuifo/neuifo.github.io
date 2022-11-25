@@ -1,0 +1,15 @@
+---
+layout: post
+title: "自制系统的动态库卸载"
+date: 2020-12-20 15:20:11 +0800
+categories: 2020-12
+tags: aosp
+img: 
+describe: 主动卸载指定so库
+---
+
+
+[参考值啦](https://bbs.pediy.com/thread-255674.htm)
+[参考值啦](https://www.jianshu.com/p/bf8b4a90f825)
+[参考值啦](https://www.jianshu.com/p/6a075297f9b6)
+[参考值啦](https://bbs.pediy.com/thread-255674.htm)

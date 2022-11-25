@@ -1,18 +1,20 @@
 ---
 layout: post
-title: "frida提前挂钩so"
-date: 2020-10-15 15:23:26 +0800
+title: "frida使用细节补充"
+date: 2020-10-27 15:44:26 +0800
 categories: 2020-10
 tags: frida,hook
 img: 
-describe: 主要记录思路
+describe: 主要frida使用过程中的细节补充
 ---
 
-## 0x01
+
+## 提前挂钩so
+### 0x01
 
 需求就是在加载so后立即hook函数
 
-## 0x02
+### 0x02
 这个针对老版本
 
         var android_dlopen_ext = Module.findExportByName(null, "android_dlopen_ext");
@@ -58,4 +60,195 @@ describe: 主要记录思路
         function dlopentodo(){
             //todo ...
         }
+        
+## hook动态加载的dex，与查找interface
 
+### [参考资料1](https://eternalsakura13.com/2020/07/04/frida/)
+    
+   样例
+    
+   ```shell
+       package com.example.androiddemo.Dynamic;
+       
+       public interface CheckInterface {
+           boolean check();
+       }
+       ...
+       
+       public class DynamicCheck implements CheckInterface {
+           public boolean check() {
+               return false;
+           }
+       }
+       ...
+       public class FridaActivity5 extends BaseFridaActivity {
+           private CheckInterface DynamicDexCheck = null;
+           ...
+           public CheckInterface getDynamicDexCheck() {
+               if (this.DynamicDexCheck == null) {
+                   loaddex();
+               }
+               return this.DynamicDexCheck;
+           }
+       
+           /* access modifiers changed from: protected */
+           public void onCreate(Bundle bundle) {
+               super.onCreate(bundle);
+               loaddex();
+               //this.DynamicDexCheck = (CheckInterface) new DexClassLoader(str, filesDir.getAbsolutePath(), (String) null, getClassLoader()).loadClass("com.example.androiddemo.Dynamic.DynamicCheck").newInstance();
+           }
+       
+           public void onCheck() {
+               if (getDynamicDexCheck() == null) {
+                   Toast.makeText(this, "onClick loaddex Failed!", 1).show();
+               } else if (getDynamicDexCheck().check()) {
+                   CheckSuccess();
+                   startActivity(new Intent(this, FridaActivity6.class));
+                   finishActivity(0);
+               } else {
+                   super.CheckFailed();
+               }
+           }
+       }
+   ```
+
+   js代码
+
+   ```shell   
+       Java.perform(function () {
+               // Java.choose("com.example.androiddemo.Activity.FridaActivity5",{
+               //     onMatch:function(x){
+               //         console.log(x.getDynamicDexCheck().$className)
+               //     },onComplete:function(){}
+               // })
+               console.log("start")
+               Java.enumerateClassLoaders({
+                   onMatch: function (loader) {
+                       try {
+                           if(loader.findClass("com.example.androiddemo.Dynamic.DynamicCheck")){
+                               console.log("Successfully found loader")
+                               console.log(loader);
+                               Java.classFactory.loader = loader ;
+                           }
+                       }
+                       catch(error){
+                           console.log("find error:" + error)
+                       }
+                   },
+                   onComplete: function () {
+                       console.log("end1")
+                   }
+               })
+               Java.use("com.example.androiddemo.Dynamic.DynamicCheck").check.implementation = function () {
+                   return true
+               }
+               console.log("end2")
+           })
+   ```
+
+## 类强转
+
+### [参考资料1](https://eternalsakura13.com/2020/07/04/frida/)
+
+   样例
+   
+   ```shell
+       public class Water { // 水 类
+           public static String flow(Water W) { // 水 的方法
+               // SomeSentence
+               Log.d("2Object", "water flow: I`m flowing");
+               return "water flow: I`m flowing";
+           }
+       
+           public String still(Water W) { // 水 的方法
+               // SomeSentence
+               Log.d("2Object", "water still: still water runs deep!");
+               return "water still: still water runs deep!";
+           }
+       }
+       ...
+       public class Juice extends Water { // 果汁 类 继承了水类
+       
+           public String fillEnergy(){
+               Log.d("2Object", "Juice: i`m fillingEnergy!");
+               return "Juice: i`m fillingEnergy!";
+           }
+
+            ...
+       }
+   ```
+
+   js代码
+   
+   ```shell
+        var JuiceHandle = null ;
+        Java.choose("com.r0ysue.a0526printout.Juice",{
+           onMatch:function(instance){
+               console.log("found juice instance",instance);
+               console.log("juice instance call fill",instance.fillEnergy());
+               JuiceHandle = instance;
+           },onComplete:function(){
+               console.log("juice handle search completed!")
+           }
+        })
+        console.log("Saved juice handle :",JuiceHandle);
+        var WaterHandle = Java.cast(JuiceHandle,Java.use("com.r0ysue.a0526printout.Water"))
+        console.log("call Waterhandle still method:",WaterHandle.still(WaterHandle));
+
+   ```
+
+## 创建新接口实现类
+
+  样例:
+  
+  ```shell
+      public interface liquid {
+          public String flow();
+      }
+
+```
+
+  js代码
+  
+  ```shell
+      Java.perform(function(){
+              var liquid = Java.use("com.r0ysue.a0526printout.liquid");
+              var beer = Java.registerClass({
+                  name: 'com.r0ysue.a0526printout.beer',
+                  implements: [liquid],
+                  methods: {
+                      flow: function () {
+                          console.log("look, beer is flowing!")
+                          return "look, beer is flowing!";
+                      }
+                  }
+              });
+              console.log("beer.bubble:",beer.$new().flow())      
+          })
+```
+
+## hook特殊字符
+
+  ```shell
+        Java.perform(
+                function x() {
+        
+                    var targetClass = "com.example.hooktest.MainActivity";
+        
+                    var hookCls = Java.use(targetClass);
+                    var methods = hookCls.class.getDeclaredMethods();
+        
+                    for (var i in methods) {
+                        console.log(methods[i].toString());
+                        console.log(encodeURIComponent(methods[i].toString().replace(/^.*?\.([^\s\.\(\)]+)\(.*?$/, "$1")));
+                    }
+        
+                    hookCls[decodeURIComponent("%D6%8F")]
+                        .implementation = function (x) {
+                            console.log("original call: fun(" + x + ")");
+                            var result = this[decodeURIComponent("%D6%8F")](900);
+                            return result;
+                        }
+                }
+            )  
+```

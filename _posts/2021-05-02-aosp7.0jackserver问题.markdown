@@ -1,0 +1,178 @@
+---
+layout: post
+title: "aosp7.0jackserver无响问题"
+date: 2021-05-03 00:00:59 +0800
+categories: 2021-05
+tags: aosp,ubuntu,jackserver
+img: /assets/images/blog/2021-05/jack_server_logo.webp
+describe: 想骂人，口才却不好
+---
+
+
+## 0x01:输出
+
+   奈何本人口才不行，我真的很想正式地，好好地，郑重地问候写jackserver的人
+   
+   你*<font color=red size=4>灵车飘逸</font>的<font color=green size=5>升天棺材</font>都没你写的代码秀
+   
+   ![菜狗2](/assets/images/blog/2021-05/noob_time.webp)
+   
+   我键盘上撒把米，抓只<font color=red size=4>鸡</font>来<font color=red size=4>啄</font>，都写不出这样的玩意...
+   
+   ![JACK_SERVER](/assets/images/blog/2021-05/server_ssl.png)
+   
+   这个<font color=green size=4>操蛋的问题整整卡了4天</font>
+   
+   ![菜狗](/assets/images/blog/2021-05/noob.webp)
+
+
+## 0x02:问题
+   
+   首先是介绍下[JACK_SERVER](https://source.android.com/setup/build/jack)
+   
+   简而言之就是在编译期间，负责`生成dex`文件的一个`java程序`
+   
+   然后是突然就不能编译了，问题表现如图:
+   ![JACK_ERROR_1](/assets/images/blog/2021-05/error_2.png)
+   
+   ![JACK_ERROR_2](/assets/images/blog/2021-05/error_1.png)
+   
+   总结来说有以下可能性的问题:
+   
+   * 多用户端口一致问题
+   
+   * 内存不够问题
+   
+   * ssl握手失败
+   
+## 0x03:解决
+
+   解决嘛，对症下药就是了
+   
+   内存不够这个不谈了，硬件问题不在本文讨论范围内。。（我32g内存，怎么着都不是这个问题）
+   
+   多用户端口号问题随便搜一搜就能找到答案
+   
+   大多数问题解决方案可以看[这里](https://issuetracker.google.com/issues/37070263)
+   
+   [一般问题方案1](https://www.cnblogs.com/blogs-of-lxl/p/11589521.html)
+   
+   [一般问题方案2](https://www.cnblogs.com/schips/p/android_n_config_for_mutil-user_build.html)
+   
+   
+   这里重点介绍我遇到的ssl失败的问题及包含`失败的`解决过程
+   
+   1. 未执行到底的失败方向
+       
+      先看错误日志:
+   
+      ![CURL_ERROR1](/assets/images/blog/2021-05/curl_error.png)
+  
+      这是我初次遇到的提示，但是思路没弄对，以为是`jackserver`的问题，各种用一般问题的思路去搜索`jackserver相关问题`
+  
+      还尝试`关闭jackserver`进行编译什么的。。。费了老大劲发现没有替代方案。。。。
+  
+      ![wrong_way](/assets/images/blog/2021-05/wrong_way.webp)
+  
+      目前为止，本质是curl调用openssl的触发的问题，是<font color=red size=4>版本太新了</font>，导致openssl`舍弃`了SSLv3
+  
+      这里就不得不吐槽下ubuntu了，我还特意只勾选了重要更新,估计是把openssl及其相关的libssl-dev都更新了，导致curl调用失败
+  
+      ![ubuntu_update](/assets/images/blog/2021-05/ubuntu_update.png)
+   
+      这里我`盲目自信`采取了`重装系统`+`手动编译`curl和openssl的方式
+      
+      嗯，这又他妈是个大坑。。。
+      
+        1. 编译openssl
+           
+           系统一定不要超过ubuntu18，我在20上编译，死活不能替代系统本身的openssl，可能安装替换的时候还有效
+           
+           一旦重启，就自动被替换成系统自带不支持sslv3的openssl，坑了我好久好久。。
+           
+           先说结果把：
+           
+           <font color=red size=4>我编译成功后，支持了sslv3，但是忘了添加各种Cipher的选项。。。</font>
+           
+           导致很顺利的得到如下结果:
+                      
+           ![CURL_ERROR](/assets/images/blog/2021-05/curl_features.png)
+           
+           这里我[参考这篇](https://www.cnblogs.com/jsjliyang/p/10606908.html) <br>
+                [参考这里](https://www.cnblogs.com/hugetong/p/11773663.html)
+           
+           使用的配置命令为
+           ```shell
+             ./configure enable-ssl3 enable-ssl3-method linux-x86_64
+           ```
+           我下的是1.0.1系列的版本，特意查了更新日志，挑了个禁用sslv3版本之前的一个release
+           
+           注意1.0.1系列安装的路径为/usr/local/ssl,而不是/usr/local/bin/openssl
+           
+        2. 编译curl
+        
+           这里[参考](https://www.cnblogs.com/suidouya/p/7387861.html) <br>
+           [参考2](https://curl.se/docs/install.html)
+           
+           下载的curl版本为最新版本，使用的配置命令如下:
+           ```shell
+             ./Configure --with-ssl=/usr/local/ssl --prefix=/usr/local/ssl/include
+           ```
+           这里有个隐藏的`坑`,那就是curl在编译需要依赖`libssl-dev`
+           
+           而如果你通过`apt install`去`安装libssl-dev`获取的库是不支持sslv3方法的，甚至连部分接口都没有。。。        
+            
+           编译成功后我得到的版本信息，及jackserver的错误信息:
+           
+           ![openssl_error](/assets/images/blog/2021-05/openssl_error.png)
+           
+        搞到这里，我都快吐了，真的![心态炸裂](/assets/images/blog/2021-05/fuck.webp)
+        
+        openssl不自带libssl-dev模块，curl编译却使用了最新的模块,简直了～～～
+       
+   2. `aptitude`
+  
+      再经历了编译openssl和curl之后我，我重新思考，其实没有必要这么麻烦
+      
+      我是`突然`不支持sslv3的，也就是说我不要更新openssl相关库就可以了
+      
+      顺着这个思路我`再次重装`了`系统`，特地去掉了`自动更新`相关选项，`手动`的来管理相关库
+      
+      这里坚决不能使用`apt-get install`去安装库，这会导致相关的库全部更新到最新版。。
+      
+      嗯，在编译过程中，接触到了`aptitude`这玩意
+      
+      这个在安装的时候会提示你是否帮你<font color=red size=4>降级相关库</font>
+      
+      aosp7.0需要的是python2，由于ubuntu18.04默认的openssl是支持sslv3的
+      
+      我需要做的就是优先安装curl，让他依赖的库，降级到和系统版本一致就行了..
+      
+      ![version](/assets/images/blog/2021-05/correct_version.png)
+      
+      
+   3. 其他可能性
+   
+      这里有个[方案](https://stackoverflow.com/questions/61568215/openssl-v1-1-1-ubuntu-20-tlsv1-no-protocols-available)和
+      [这个](https://askubuntu.com/questions/1233186/ubuntu-20-04-how-to-set-lower-ssl-security-level)，说是额外添加一个配置文件就行
+      
+      我就懒得试了，![下次一定](/assets/images/blog/2021-05/next_time.webp)
+      
+      感觉这种问题完全可以在开发jackserver的时候就把问题给消灭掉
+      
+      非要用签名校验，就使用tls不行吗？
+      
+      `jackserver`这玩意坑爹的到了android9就不用了，意味着这个坑是没有人回来填了。。。。
+      
+      妈的，挖个坑就跑，这活干的舒服啊。。
+      
+      
+      
+      
+   
+   
+   
+   
+   
+       
+
