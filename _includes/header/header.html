@@ -867,9 +867,7 @@
     var names = new Array();
     var urls = new Array();
     $.ajaxSetup({cache: true});
-    $.getJSON("{{ " / search.json
-    " | relative_url }}"
-    ).done(function (data) {
+    $.getJSON("{{"search.json" | relative_url }}").done(function (data) {
         for (var index in data) {
             var item = data[index];
             names[index] = item.title;
